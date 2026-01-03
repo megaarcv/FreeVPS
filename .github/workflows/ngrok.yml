@@ -1,51 +1,4 @@
-name: Ubuntu ssh Virtual Machine
-on:
-  workflow_dispatch:
-
-defaults:
-  run:
-    shell: bash
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-
-      - name: Preparing Linux Environment
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y curl ca-certificates openssh-server net-tools
-
-      - name: Install ngrok (v3 official)
-        run: |
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update -y
-          sudo apt-get install -y ngrok
-          ngrok version
-
-      - name: Set password (runner)
-        env:
-          LINUX_USER_PASSWORD: ${{ secrets.LINUX_USER_PASSWORD }}
-        run: |
-          if [ -n "${LINUX_USER_PASSWORD}" ]; then
-            echo "runner:${LINUX_USER_PASSWORD}" | sudo chpasswd
-            echo "Password for runner updated."
-          else
-            echo "LINUX_USER_PASSWORD is empty (skip)."
-          fi
-
-      - name: Ensure SSH is running
-        run: |
-          sudo systemctl enable ssh
-          sudo systemctl restart ssh
-          echo "== SSH LISTEN =="
-          sudo ss -lntp | grep ':22' || (echo "SSH not listening on 22" && exit 1)
-
-      - name: Start ngrok TCP 22 (robust)
+- name: Start ngrok TCP 22 (FINAL FIX)
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
@@ -58,22 +11,22 @@ jobs:
 
           ngrok config add-authtoken "${NGROK_AUTH_TOKEN}"
 
-          # Paksa web interface aktif di 4040
-          nohup ngrok tcp 22 --web-addr=127.0.0.1:4040 --log=stdout --log-level=info > ngrok.log 2>&1 &
+          # Start ngrok (TANPA --web-addr)
+          nohup ngrok tcp 22 --log=stdout > ngrok.log 2>&1 &
           NGROK_PID=$!
 
           echo "Ngrok PID: $NGROK_PID"
-          sleep 2
+          sleep 3
 
           echo "== CHECK NGROK PROCESS =="
           ps -p $NGROK_PID >/dev/null 2>&1
           if [ $? -ne 0 ]; then
-            echo "NGROK MATI / CRASH. Ini lognya:"
+            echo "NGROK CRASH. Log:"
             tail -n 200 ngrok.log
             exit 1
           fi
 
-          echo "== WAIT WEB API 4040 =="
+          echo "== WAIT NGROK API 4040 =="
           OK=0
           for i in {1..30}; do
             curl -s http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1
@@ -85,20 +38,15 @@ jobs:
           done
 
           if [ $OK -ne 1 ]; then
-            echo "Gagal akses http://127.0.0.1:4040 (curl exit 7 biasanya)."
-            echo "Ini log ngrok:"
+            echo "Ngrok API 4040 tidak bisa diakses"
             tail -n 200 ngrok.log
             exit 1
           fi
 
-          echo "================= NGROK TUNNEL INFO ================="
-          curl -s http://127.0.0.1:4040/api/tunnels
-          echo
-          echo "====================================================="
+          echo "================ NGROK TUNNEL ================"
+          curl -s http://127.0.0.1:4040/api/tunnels | sed 's/\\n/\n/g'
+          echo "=============================================="
 
+          echo ""
           echo "LOGIN SSH:"
           echo "ssh runner@<HOST> -p <PORT>"
-          echo "Password: pakai secret LINUX_USER_PASSWORD"
-
-      - name: Keep Running Ubuntu System and keepAlive
-        run: sleep 6h
