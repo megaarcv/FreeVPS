@@ -17,9 +17,8 @@ jobs:
       - name: Preparing Linux Environment
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y curl unzip ca-certificates
+          sudo apt-get install -y curl ca-certificates openssh-server net-tools
 
-      # Install ngrok v3 official (fix ERR_NGROK_121)
       - name: Install ngrok (v3 official)
         run: |
           curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
@@ -28,7 +27,6 @@ jobs:
           sudo apt-get install -y ngrok
           ngrok version
 
-      # Optional: set password user runner (kalau mau login pakai password)
       - name: Set password (runner)
         env:
           LINUX_USER_PASSWORD: ${{ secrets.LINUX_USER_PASSWORD }}
@@ -40,45 +38,67 @@ jobs:
             echo "LINUX_USER_PASSWORD is empty (skip)."
           fi
 
-      # Start SSH service
       - name: Ensure SSH is running
         run: |
-          sudo apt-get install -y openssh-server
           sudo systemctl enable ssh
           sudo systemctl restart ssh
-          sudo ss -tulpn | grep -E ':22' || true
+          echo "== SSH LISTEN =="
+          sudo ss -lntp | grep ':22' || (echo "SSH not listening on 22" && exit 1)
 
-      # Start ngrok TCP tunnel for SSH
-      - name: Start ngrok TCP 22
+      - name: Start ngrok TCP 22 (robust)
         env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
         run: |
+          set +e
+
           if [ -z "${NGROK_AUTH_TOKEN}" ]; then
-            echo "ERROR: NGROK_AUTH_TOKEN secret is empty!"
+            echo "ERROR: NGROK_AUTH_TOKEN secret kosong!"
             exit 1
           fi
 
           ngrok config add-authtoken "${NGROK_AUTH_TOKEN}"
 
-          # Start ngrok in background
-          nohup ngrok tcp 22 --log=stdout > ngrok.log 2>&1 &
+          # Paksa web interface aktif di 4040
+          nohup ngrok tcp 22 --web-addr=127.0.0.1:4040 --log=stdout --log-level=info > ngrok.log 2>&1 &
+          NGROK_PID=$!
 
-          # Wait ngrok ready
+          echo "Ngrok PID: $NGROK_PID"
+          sleep 2
+
+          echo "== CHECK NGROK PROCESS =="
+          ps -p $NGROK_PID >/dev/null 2>&1
+          if [ $? -ne 0 ]; then
+            echo "NGROK MATI / CRASH. Ini lognya:"
+            tail -n 200 ngrok.log
+            exit 1
+          fi
+
+          echo "== WAIT WEB API 4040 =="
+          OK=0
           for i in {1..30}; do
-            if curl -s http://127.0.0.1:4040/api/tunnels | grep -q '"public_url"'; then
+            curl -s http://127.0.0.1:4040/api/tunnels >/dev/null 2>&1
+            if [ $? -eq 0 ]; then
+              OK=1
               break
             fi
             sleep 1
           done
 
+          if [ $OK -ne 1 ]; then
+            echo "Gagal akses http://127.0.0.1:4040 (curl exit 7 biasanya)."
+            echo "Ini log ngrok:"
+            tail -n 200 ngrok.log
+            exit 1
+          fi
+
           echo "================= NGROK TUNNEL INFO ================="
-          curl -s http://127.0.0.1:4040/api/tunnels | sed 's/\\n/\n/g'
+          curl -s http://127.0.0.1:4040/api/tunnels
+          echo
           echo "====================================================="
 
-          echo ""
-          echo "Cara login (contoh):"
-          echo "ssh runner@<host> -p <port>"
-          echo "Password: (yang kamu set di secret LINUX_USER_PASSWORD)"
+          echo "LOGIN SSH:"
+          echo "ssh runner@<HOST> -p <PORT>"
+          echo "Password: pakai secret LINUX_USER_PASSWORD"
 
       - name: Keep Running Ubuntu System and keepAlive
         run: sleep 6h
