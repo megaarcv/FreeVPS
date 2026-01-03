@@ -1,5 +1,4 @@
 name: Ubuntu ssh Virtual Machine
-
 on:
   workflow_dispatch:
 
@@ -12,29 +11,74 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3.5.2
+      - name: Checkout
+        uses: actions/checkout@v3
 
       - name: Preparing Linux Environment
-        run: sudo apt-get update
-
-      # 🔥 INSTALL NGROK TERBARU (INI KUNCI FIX)
-      - name: Install ngrok (latest)
         run: |
-          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" \
-            | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update
-          sudo apt install -y ngrok
+          sudo apt-get update -y
+          sudo apt-get install -y curl unzip ca-certificates
 
-      - name: Setting Up the Ubuntu Environment
-        run: bash linux-ssh.sh
+      # Install ngrok v3 official (fix ERR_NGROK_121)
+      - name: Install ngrok (v3 official)
+        run: |
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update -y
+          sudo apt-get install -y ngrok
+          ngrok version
+
+      # Optional: set password user runner (kalau mau login pakai password)
+      - name: Set password (runner)
         env:
           LINUX_USER_PASSWORD: ${{ secrets.LINUX_USER_PASSWORD }}
+        run: |
+          if [ -n "${LINUX_USER_PASSWORD}" ]; then
+            echo "runner:${LINUX_USER_PASSWORD}" | sudo chpasswd
+            echo "Password for runner updated."
+          else
+            echo "LINUX_USER_PASSWORD is empty (skip)."
+          fi
+
+      # Start SSH service
+      - name: Ensure SSH is running
+        run: |
+          sudo apt-get install -y openssh-server
+          sudo systemctl enable ssh
+          sudo systemctl restart ssh
+          sudo ss -tulpn | grep -E ':22' || true
+
+      # Start ngrok TCP tunnel for SSH
+      - name: Start ngrok TCP 22
+        env:
           NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-          CHROME_HEADLESS_CODE: ${{ secrets.CHROME_HEADLESS_CODE }}
-          LINUX_MACHINE_NAME: ${{ secrets.LINUX_MACHINE_NAME }}
-          LINUX_USERNAME: ${{ secrets.LINUX_USERNAME }}
+        run: |
+          if [ -z "${NGROK_AUTH_TOKEN}" ]; then
+            echo "ERROR: NGROK_AUTH_TOKEN secret is empty!"
+            exit 1
+          fi
+
+          ngrok config add-authtoken "${NGROK_AUTH_TOKEN}"
+
+          # Start ngrok in background
+          nohup ngrok tcp 22 --log=stdout > ngrok.log 2>&1 &
+
+          # Wait ngrok ready
+          for i in {1..30}; do
+            if curl -s http://127.0.0.1:4040/api/tunnels | grep -q '"public_url"'; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "================= NGROK TUNNEL INFO ================="
+          curl -s http://127.0.0.1:4040/api/tunnels | sed 's/\\n/\n/g'
+          echo "====================================================="
+
+          echo ""
+          echo "Cara login (contoh):"
+          echo "ssh runner@<host> -p <port>"
+          echo "Password: (yang kamu set di secret LINUX_USER_PASSWORD)"
 
       - name: Keep Running Ubuntu System and keepAlive
         run: sleep 6h
